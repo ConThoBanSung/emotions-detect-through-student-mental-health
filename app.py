@@ -48,10 +48,10 @@ except ConnectionFailure as e:
 genai.configure(api_key="AIzaSyBkNYQEPaBMOJz6JzYnU--oI8JY5EXkJKk")
 
 # Tải mô hình và scaler cho từng endpoint
-model_semester_change = joblib.load('./model/best_model.pkl')
-scaler_semester_change = joblib.load('./model/label.pkl')
-dcm = joblib.load('./model/model.joblib')
-encoders = joblib.load('./model/encoders.joblib')
+model_semester_change = joblib.load('best_model.pkl')
+scaler_semester_change = joblib.load('label.pkl')
+dcm = joblib.load('model.joblib')
+encoders = joblib.load('encoders.joblib')
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 
