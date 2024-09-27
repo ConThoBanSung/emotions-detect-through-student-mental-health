@@ -5,10 +5,16 @@ from typing import List
 import pandas as pd
 import joblib
 import google.generativeai as genai
-
+from firebase_admin import auth
 app = FastAPI()
+import firebase_admin
+from firebase_admin import credentials, firestore
+from fastapi import HTTPException
+from firebase_admin import auth
+from sqlalchemy.orm import Session
 
-# Cấu hình CORS
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -16,17 +22,92 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+cred = credentials.Certificate('webapp-2a68a-firebase-adminsdk-j403m-3d94bf86d5.json')  
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
-# Cấu hình Gemini API
+
 genai.configure(api_key="AIzaSyBkNYQEPaBMOJz6JzYnU--oI8JY5EXkJKk")
 
-# Tải mô hình và scaler cho từng endpoint
+
 model_semester_change = joblib.load('best_model.pkl')
 scaler_semester_change = joblib.load('label.pkl')
-model = joblib.load('model.joblib')
+dcm = joblib.load('model.joblib')
 encoders = joblib.load('encoders.joblib')
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Định nghĩa mô hình dữ liệu cho từng endpoint
+class User(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/signup")
+async def signup(user: User):
+    try:
+        
+        user_record = auth.create_user(
+            email=user.email,
+            password=user.password
+        )
+        
+        user_data = {
+            'email': user.email,
+            'uid': user_record.uid
+        }
+        db.collection('users').document(user_record.uid).set(user_data)
+
+        return {"message": "Đăng ký thành công!", "uid": user_record.uid}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Đăng ký thất bại: {str(e)}")
+
+@app.post("/login")
+async def login(user: User):
+    try:
+        
+        user_record = auth.get_user_by_email(user.email)
+
+
+        return {"message": "Đăng nhập thành công!", "uid": user_record.uid}
+    
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Email hoặc mật khẩu không đúng: {str(e)}")
+
+class Profile(BaseModel):
+    studentID: str
+    full_name: str
+    email: str
+
+@app.post("/profile")
+async def save_profile(profile: Profile):
+    print(profile)  
+    try:
+
+        user_data = {
+            'studentID': profile.studentID,
+            'full_name': profile.full_name,
+            'email': profile.email
+        }
+        db.collection('users').document(profile.email).set(user_data)
+        return {"message": "Hồ sơ đã được lưu thành công!"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Lưu hồ sơ thất bại: {str(e)}")
+@app.get("/user/{email}")
+async def get_user_info(email: str):
+    try:
+
+        user_ref = db.collection('users').where('email', '==', email).limit(1).get()
+        if not user_ref:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        user_data = user_ref[0].to_dict()
+        return {
+            "full_name": user_data.get("full_name", None),  
+            "studentID": user_data.get("studentID", None)   
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # Endpoint 1: predict_semester_change
 class SemesterChangeRequest(BaseModel):
@@ -87,8 +168,12 @@ async def predict_semester_change(data: List[SemesterChangeRequest]):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
 
-# Endpoint 2: predict
+
+
+
+# Define your request model
 class MentalHealthRequest(BaseModel):
     How_often_do_you_feel_overwhelmed_by_your_studies: str
     Do_you_have_difficulty_sleeping_due_to_stress: str
@@ -105,7 +190,7 @@ class MentalHealthRequest(BaseModel):
 def predict(data: MentalHealthRequest):
     # Convert input data to DataFrame
     input_data = pd.DataFrame([data.dict()])
-    
+
     # Rename columns to match training data
     input_data.columns = [
         'How often do you feel overwhelmed by your studies?',
@@ -119,7 +204,7 @@ def predict(data: MentalHealthRequest):
         'How often do you feel that your workload is manageable?',
         'Do you feel that you have sufficient support from friends and family?'
     ]
-    
+
     # Check if all required columns are present
     required_columns = [
         'How often do you feel overwhelmed by your studies?',
@@ -133,7 +218,7 @@ def predict(data: MentalHealthRequest):
         'How often do you feel that your workload is manageable?',
         'Do you feel that you have sufficient support from friends and family?'
     ]
-    
+
     for col in required_columns:
         if col not in input_data.columns:
             raise HTTPException(status_code=400, detail=f"Missing field: {col}")
@@ -142,11 +227,11 @@ def predict(data: MentalHealthRequest):
     for col in input_data.columns:
         if col in encoders:
             input_data[col] = encoders[col].transform(input_data[col])
-    
+
     # Make prediction
-    prediction = model.predict(input_data)
-    
-    # Tạo prompt cho GPT với dữ liệu từ frontend
+    prediction = dcm.predict(input_data)
+
+    # Create prompt for GPT
     prompt = (
         f"Những thông tin sau đây được cung cấp bởi tôi:\n"
         f"How often do you feel overwhelmed by your studies? {data.How_often_do_you_feel_overwhelmed_by_your_studies}\n"
@@ -163,7 +248,7 @@ def predict(data: MentalHealthRequest):
     )
 
     try:
-        # Khởi tạo và gọi Gemini Model
+        # Initialize and call the Gemini Model
         gemini_model = genai.GenerativeModel("gemini-1.5-flash")
         response = gemini_model.generate_content(
             prompt,
@@ -175,13 +260,23 @@ def predict(data: MentalHealthRequest):
         )
         
         gpt_output = response.text.strip()
+
+        # Save prediction and recommendation to Firebase
+        predictions_ref = db.collection("predictions")
+        prediction_data = {
+            "prediction": prediction[0],
+            "GPT_Recommendation": gpt_output
+        }
         
+        predictions_ref.add(prediction_data)  # Automatically generates a document ID
+
         return {
             "prediction": prediction[0],
             "GPT_Recommendation": gpt_output
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error in GPT diagnosis: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error in GPT diagnosis or saving to Firebase: {str(e)}")
+
     
 class GPTRequest(BaseModel):
     dropout_risk: int
@@ -211,6 +306,80 @@ async def gpt_diagnosis(gpt_request: GPTRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error in GPT diagnosis: {str(e)}")
+
+class StudentData(BaseModel):
+    StudentID: str
+    Gender: str
+    Year_of_Study: str
+    Attendance: float
+    Academic_Score: float
+    Extracurricular_Activities: str
+    Social_Interactions: str
+    Behavior_Issues: str
+    Peer_Relationships: str
+    Classroom_Behavior: str
+    Email: str  # Thêm trường email
+
+def get_latest_record_by_email(email: str):
+    
+    records_ref = db.collection("predictions")  
+    query = records_ref.where("email", "==", email).order_by("timestamp", direction=firestore.Query.DESCENDING).limit(1)
+    
+    results = query.stream()
+    latest_record = None
+
+    for doc in results:
+        latest_record = doc.to_dict()  
+        break
+
+    return latest_record
+
+
+@app.post("/predict-psychology")
+async def predict_psychology(student_data: StudentData):
+    
+    latest_record = get_latest_record_by_email(student_data.Email) 
+
+    if not latest_record:
+        return {"error": "Không tìm thấy bản ghi nào cho email này."}
+
+ 
+    prediction = latest_record["prediction"]  
+    recommendation = latest_record["recommendation"]  
+    timestamp = latest_record["timestamp"]  
+
+   
+    prompt = (
+        f"Dựa trên dữ liệu học sinh sau: \n"
+        f"Student ID: {student_data.StudentID}\n"
+        f"Gender: {student_data.Gender}\n"
+        f"Year of Study: {student_data.Year_of_Study}\n"
+        f"Attendance: {student_data.Attendance}%\n"
+        f"Academic Score: {student_data.Academic_Score}\n"
+        f"Extracurricular Activities: {student_data.Extracurricular_Activities}\n"
+        f"Social Interactions: {student_data.Social_Interactions}\n"
+        f"Behavior Issues: {student_data.Behavior_Issues}\n"
+        f"Peer Relationships: {student_data.Peer_Relationships}\n"
+        f"Classroom Behavior: {student_data.Classroom_Behavior}\n"
+        f"Dự đoán tâm lý: {prediction}\n"
+        f"Khuyến nghị: {recommendation}\n"
+        f"Timestamp: {timestamp}\n"
+        f"Hãy tạo một phân tích tâm lý cho học sinh này và cho tôi kết quả cuối cùng về sức khỏe tâm thần của học sinh này (output là tiếng việt)."
+    )
+
+    # Gọi API Gemini để tạo phản hồi
+    response = model.generate_content(
+        prompt,
+        generation_config=genai.types.GenerationConfig(
+            candidate_count=1,
+            max_output_tokens=2000,  # Bạn có thể điều chỉnh số token tối đa
+            temperature=0.1,  # Bạn có thể điều chỉnh độ ngẫu nhiên
+        ),
+    )
+    geminioutput = response.text.strip()
+    
+    return {"response": geminioutput}
+
 
 if __name__ == "__main__":
     import uvicorn
